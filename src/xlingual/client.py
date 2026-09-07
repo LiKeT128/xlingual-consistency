@@ -8,11 +8,13 @@ honouring Retry-After when the server sends one.
 from __future__ import annotations
 
 import random
+import threading
 import time
 
 import requests
 
 from .config import Config
+from .ratelimit import RateLimiter
 
 
 class ProviderError(RuntimeError):
@@ -20,17 +22,28 @@ class ProviderError(RuntimeError):
 
 
 class ChatClient:
+    """Thread-safe: several workers may share one instance.
+
+    Each thread gets its own requests.Session, and all of them draw from a
+    single RateLimiter so the per-minute budget is respected across the pool
+    rather than per worker.
+    """
+
     def __init__(self, config: Config) -> None:
         self.config = config
-        self._session = requests.Session()
-        self._min_interval = 60.0 / max(config.requests_per_minute, 1)
-        self._last_call = 0.0
+        self._limiter = RateLimiter(config.requests_per_minute)
+        self._local = threading.local()
+
+    @property
+    def _session(self) -> requests.Session:
+        session = getattr(self._local, "session", None)
+        if session is None:
+            session = requests.Session()
+            self._local.session = session
+        return session
 
     def _throttle(self) -> None:
-        elapsed = time.monotonic() - self._last_call
-        if elapsed < self._min_interval:
-            time.sleep(self._min_interval - elapsed)
-        self._last_call = time.monotonic()
+        self._limiter.acquire()
 
     def complete(self, prompt: str, *, model: str | None = None) -> str:
         """Send one user message and return the assistant's text."""

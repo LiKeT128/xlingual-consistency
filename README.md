@@ -79,16 +79,32 @@ xlc annotate --sample 50  # hand-label a sample, blind to the judge
 xlc report                # writes results/<model>/report.md
 ```
 
-A full run is roughly 250 requests including judging. On a free tier at 25 requests/minute that is about 10–15 minutes.
-
 Results are stored per model, so running the suite against two models and diffing the reports is the intended way to ask whether a newer release actually closed the gap.
+
+## How long a run takes
+
+A full run is 200 answers plus 48 judge calls. The wall time is set by your provider's requests-per-minute cap, not by this tool:
+
+| Tier | RPM | Full run |
+| --- | --- | --- |
+| Gemini free | 10–15 | ~13–20 min |
+| Groq free | ~30 | ~7 min |
+| Paid | hundreds | limited by `XLC_CONCURRENCY` |
+
+`xlc run` prints its own estimate before it starts, so the number is visible up front rather than discovered halfway through.
+
+Want a result in one minute instead? Take a slice — `xlc run --limit 12 --languages en ru` is 24 requests and enough to check the pipeline end to end. `xlc grade --no-judge` then skips the judge and grades the deterministic 38 categories immediately.
+
+What the tool deliberately does **not** do is pack several questions into one request to cut the request count. Answering five questions in one context is not the same experiment as five independent conversations — earlier items condition later ones — so the saving would come straight out of the validity of the result.
 
 ## Built for free tiers
 
 Free endpoints rate-limit hard and fall over without warning, so the client is built around that rather than against it:
 
-- **Self-pacing.** `XLC_RPM` sets a requests-per-minute budget and the client spaces calls to fit inside it, instead of firing everything and collecting 429s.
+- **Sliding-window rate limiting.** `XLC_RPM` is a real per-minute budget counted over the trailing sixty seconds and shared by every worker, not a fixed sleep between calls. A fixed sleep caps you at one request per interval even when the provider would take six at once.
+- **Concurrency up to that budget.** `XLC_CONCURRENCY` workers run in parallel and block only when the budget is genuinely spent. This removes idle waiting; it cannot beat the provider's cap, and the estimate printed at startup shows which of the two is binding.
 - **Backoff that respects `Retry-After`.** 429 and 5xx are retried with exponential backoff; when the server states a wait, that wait is used.
+- **Fail fast on setup mistakes.** One preflight request checks the model id before the other 200 are spent on a typo, and a run where every call failed exits non-zero instead of reporting success.
 - **Resumable by design.** Answers and grades are appended to JSONL as they arrive. Interrupt at any point — `Ctrl+C` included — and rerunning the same command picks up exactly where it stopped, so a dropped connection never costs a full re-run.
 
 ## Reading the output

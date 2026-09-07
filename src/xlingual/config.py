@@ -50,6 +50,7 @@ class Config:
     temperature: float
     max_tokens: int
     requests_per_minute: int
+    concurrency: int
     max_retries: int
     timeout: int
     system_prompt: str
@@ -83,6 +84,7 @@ class Config:
             temperature=float(os.environ.get("XLC_TEMPERATURE", "0")),
             max_tokens=int(os.environ.get("XLC_MAX_TOKENS", "512")),
             requests_per_minute=int(os.environ.get("XLC_RPM", "25")),
+            concurrency=max(1, int(os.environ.get("XLC_CONCURRENCY", "6"))),
             max_retries=int(os.environ.get("XLC_MAX_RETRIES", "5")),
             timeout=int(os.environ.get("XLC_TIMEOUT", "90")),
             system_prompt=os.environ.get("XLC_SYSTEM_PROMPT", ""),

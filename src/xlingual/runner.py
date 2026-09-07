@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -19,6 +21,7 @@ from .config import Config, RESULTS_DIR
 from .dataset import Item
 from .graders import ERROR, NEEDS_JUDGE, grade
 from .judge import judge_answer
+from .ratelimit import estimate_seconds, format_duration
 
 ANSWERS_FILE = "answers.jsonl"
 GRADES_FILE = "grades.jsonl"
@@ -98,19 +101,39 @@ def collect_answers(config: Config, items: list[Item], *, languages=LANGUAGES) -
 
     preflight(config, client)
 
-    print(f"Collecting {len(pending)} answers with {config.model} ({config.provider})...")
+    workers = min(config.concurrency, len(pending))
+    estimate = estimate_seconds(len(pending), config.requests_per_minute, workers=workers)
+    print(f"Collecting {len(pending)} answers with {config.model} ({config.provider})")
+    print(f"  {workers} workers, {config.requests_per_minute} req/min budget "
+          f"-> about {format_duration(estimate)}")
+
     started = time.monotonic()
     failures: list[str] = []
-    for index, (item, language) in enumerate(pending, 1):
+    write_lock = threading.Lock()
+    done_count = 0
+
+    def work(job: tuple[Item, str]) -> tuple[Answer, str | None]:
+        item, language = job
         prompt = item.prompts[language]
         try:
             text = client.complete(prompt)
-            record = Answer(item.id, language, config.model, prompt, text)
+            return Answer(item.id, language, config.model, prompt, text), None
         except ProviderError as exc:
-            record = Answer(item.id, language, config.model, prompt, "", str(exc))
-            failures.append(f"{item.id}/{language}: {exc}")
-        _append(path, record)
-        _progress(index, len(pending), item.id, language, started)
+            return (
+                Answer(item.id, language, config.model, prompt, "", str(exc)),
+                f"{item.id}/{language}: {exc}",
+            )
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(work, job): job for job in pending}
+        for future in as_completed(futures):
+            record, failure = future.result()
+            with write_lock:
+                _append(path, record)
+                done_count += 1
+                if failure:
+                    failures.append(failure)
+                _progress(done_count, len(pending), record.item_id, record.language, started)
     print()
     report_failures(len(pending), failures)
     return path
@@ -147,44 +170,72 @@ def grade_answers(config: Config, items: list[Item], *, use_judge: bool = True) 
     done = {(row["item_id"], row["language"]) for row in _read_jsonl(grades_path)}
     by_id = {item.id: item for item in items}
 
-    client = ChatClient(config) if use_judge else None
     pending = [row for row in answers if (row["item_id"], row["language"]) not in done]
     if not pending:
         print(f"All {len(answers)} answers already graded.")
         return grades_path
 
-    print(f"Grading {len(pending)} answers...")
-    started = time.monotonic()
-    for index, row in enumerate(pending, 1):
+    # Deterministic checks are pure functions over text, so they all run first
+    # and instantly. Only what is left over costs a network round trip.
+    needs_judge: list[dict] = []
+    for row in pending:
         item = by_id.get(row["item_id"])
         if item is None:
             continue
         if row.get("error"):
-            verdict = type("V", (), {"status": ERROR, "detail": row["error"]})()
-            judged = False
-        else:
-            verdict = grade(item, row["answer"])
-            judged = False
-            if verdict.status == NEEDS_JUDGE:
-                if client is None:
-                    continue
-                verdict = judge_answer(client, item, row["language"], row["answer"])
-                judged = True
-        _append(
-            grades_path,
-            Grade(
-                item_id=item.id,
-                language=row["language"],
-                category=item.category,
-                model=row["model"],
-                status=verdict.status,
-                detail=verdict.detail,
-                judged=judged,
-            ),
-        )
-        _progress(index, len(pending), item.id, row["language"], started)
+            _append(grades_path, _grade_record(item, row, ERROR, row["error"], False))
+            continue
+        verdict = grade(item, row["answer"])
+        if verdict.status == NEEDS_JUDGE:
+            needs_judge.append(row)
+            continue
+        _append(grades_path, _grade_record(item, row, verdict.status, verdict.detail, False))
+
+    print(f"Graded {len(pending) - len(needs_judge)} answers deterministically.")
+
+    if not needs_judge:
+        return grades_path
+    if not use_judge:
+        print(f"Skipping {len(needs_judge)} judged answers (--no-judge).")
+        return grades_path
+
+    client = ChatClient(config)
+    workers = min(config.concurrency, len(needs_judge))
+    estimate = estimate_seconds(len(needs_judge), config.requests_per_minute, workers=workers)
+    print(f"Judging {len(needs_judge)} answers with {config.judge_model} "
+          f"-> about {format_duration(estimate)}")
+
+    started = time.monotonic()
+    write_lock = threading.Lock()
+    done_count = 0
+
+    def work(row: dict):
+        item = by_id[row["item_id"]]
+        return row, judge_answer(client, item, row["language"], row["answer"])
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(work, row) for row in needs_judge]
+        for future in as_completed(futures):
+            row, verdict = future.result()
+            item = by_id[row["item_id"]]
+            with write_lock:
+                _append(grades_path, _grade_record(item, row, verdict.status, verdict.detail, True))
+                done_count += 1
+                _progress(done_count, len(needs_judge), item.id, row["language"], started)
     print()
     return grades_path
+
+
+def _grade_record(item: Item, row: dict, status: str, detail: str, judged: bool) -> Grade:
+    return Grade(
+        item_id=item.id,
+        language=row["language"],
+        category=item.category,
+        model=row["model"],
+        status=status,
+        detail=detail,
+        judged=judged,
+    )
 
 
 def _progress(index: int, total: int, item_id: str, language: str, started: float) -> None:
