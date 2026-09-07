@@ -82,6 +82,29 @@ class ChatClient:
 
         raise ProviderError(f"gave up after {self.config.max_retries} attempts: {last_error}")
 
+    def list_models(self) -> list[str]:
+        """Ask the provider which model ids this key can actually call.
+
+        Provider docs go stale and free tiers expose a different set from the
+        paid ones, so the endpoint is the only reliable answer to "what can I
+        run".
+        """
+        response = self._session.get(
+            f"{self.config.base_url}/models",
+            headers={"Authorization": f"Bearer {self.config.api_key}"},
+            timeout=self.config.timeout,
+        )
+        if response.status_code != 200:
+            raise ProviderError(f"HTTP {response.status_code}: {response.text[:400]}")
+
+        body = response.json()
+        entries = body.get("data", body.get("models", []))
+        ids = []
+        for entry in entries:
+            name = entry.get("id") or entry.get("name") or ""
+            ids.append(name.rsplit("/", 1)[-1] if name else "")
+        return sorted(i for i in ids if i)
+
     @staticmethod
     def _backoff(attempt: int) -> None:
         time.sleep(min(2**attempt + random.random(), 60))

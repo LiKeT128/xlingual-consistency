@@ -45,6 +45,30 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_models(args: argparse.Namespace) -> int:
+    """Print the model ids this key can call, straight from the provider."""
+    config = Config.from_env()
+    from .client import ChatClient, ProviderError
+
+    try:
+        ids = ChatClient(config).list_models()
+    except ProviderError as exc:
+        print(f"Could not list models: {exc}")
+        return 1
+
+    if args.filter:
+        needle = args.filter.lower()
+        ids = [i for i in ids if needle in i.lower()]
+
+    print(f"{len(ids)} models available to this key on '{config.provider}':\n")
+    for model_id in ids:
+        marker = " <- XLC_MODEL" if model_id == config.model else ""
+        print(f"  {model_id}{marker}")
+    if config.model not in ids:
+        print(f"\nWarning: XLC_MODEL='{config.model}' is not in this list.")
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     config = Config.from_env()
     items = load_items(Path(args.data) if args.data else None)
@@ -102,6 +126,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_validate = sub.add_parser("validate", help="check the dataset, no API calls")
     p_validate.set_defaults(func=cmd_validate)
+
+    p_models = sub.add_parser("models", help="list model ids this key can call")
+    p_models.add_argument("--filter", help="only ids containing this substring")
+    p_models.set_defaults(func=cmd_models)
 
     p_run = sub.add_parser("run", help="collect model answers")
     p_run.add_argument("--limit", type=int, help="only the first N items")

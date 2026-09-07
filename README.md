@@ -57,10 +57,12 @@ Works with any OpenAI-compatible endpoint. Several have a standing free tier wit
 | Provider | `XLC_PROVIDER` | Example model |
 | --- | --- | --- |
 | Groq | `groq` | `llama-3.3-70b-versatile` |
-| Google AI Studio | `gemini` | `gemini-2.5-flash` |
+| Google AI Studio | `gemini` | `gemini-3.8-flash` |
 | OpenRouter | `openrouter` | any id ending in `:free` |
 | Mistral | `mistral` | `mistral-large-latest` |
 | GitHub Models | `github` | `openai/gpt-4o-mini` |
+
+Model line-ups move fast and free tiers expose a different set from the paid ones, so treat that table as a starting point and let `xlc models` tell you what your own key can call.
 
 ```bash
 git clone https://github.com/LiKeT128/xlingual-consistency
@@ -70,6 +72,7 @@ pip install -e ".[dev]"
 cp .env.example .env      # then fill in XLC_API_KEY and XLC_MODEL
 
 xlc validate              # checks the dataset, no API calls
+xlc models                # what your key can actually call
 xlc run                   # 200 answers, resumable
 xlc grade                 # code grades 152, judge grades 48
 xlc annotate --sample 50  # hand-label a sample, blind to the judge
@@ -77,6 +80,8 @@ xlc report                # writes results/<model>/report.md
 ```
 
 A full run is roughly 250 requests including judging. On a free tier at 25 requests/minute that is about 10–15 minutes.
+
+Results are stored per model, so running the suite against two models and diffing the reports is the intended way to ask whether a newer release actually closed the gap.
 
 ## Built for free tiers
 
@@ -102,7 +107,7 @@ Every rate carries a **Wilson 95% interval**. With 12 factual items per language
 ## Development
 
 ```bash
-pytest -q          # 40+ tests, no API key needed
+pytest -q          # 42 tests, no API key needed
 xlc validate       # dataset integrity
 ```
 
