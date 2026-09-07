@@ -104,6 +104,8 @@ Free endpoints rate-limit hard and fall over without warning, so the client is b
 - **Sliding-window rate limiting.** `XLC_RPM` is a real per-minute budget counted over the trailing sixty seconds and shared by every worker, not a fixed sleep between calls. A fixed sleep caps you at one request per interval even when the provider would take six at once.
 - **Concurrency up to that budget.** `XLC_CONCURRENCY` workers run in parallel and block only when the budget is genuinely spent. This removes idle waiting; it cannot beat the provider's cap, and the estimate printed at startup shows which of the two is binding.
 - **Backoff that respects `Retry-After`.** 429 and 5xx are retried with exponential backoff; when the server states a wait, that wait is used.
+- **Adaptive budget.** A 429 halves the working rate and a clean streak walks it back up, so the client converges on the provider's real limit instead of requiring you to know it. A throttled run prints the rate it settled on, ready to paste into `.env`.
+- **A status line on its own clock.** Progress refreshes on a timer rather than only when a request returns, and names workers parked in backoff as waiting — so a slow stretch looks like a slow stretch, not a hang.
 - **Fail fast on setup mistakes.** One preflight request checks the model id before the other 200 are spent on a typo, and a run where every call failed exits non-zero instead of reporting success.
 - **Resumable by design.** Answers and grades are appended to JSONL as they arrive. Interrupt at any point — `Ctrl+C` included — and rerunning the same command picks up exactly where it stopped, so a dropped connection never costs a full re-run.
 

@@ -11,6 +11,7 @@ import random
 import re
 import threading
 import time
+from typing import Callable
 
 import requests
 
@@ -41,6 +42,9 @@ class ChatClient:
         self.config = config
         self._limiter = RateLimiter(config.requests_per_minute)
         self._local = threading.local()
+        # Set by the runner so the status line can show workers parked in
+        # backoff instead of looking frozen.
+        self.on_wait: Callable[[bool], None] | None = None
 
     @property
     def limiter(self) -> RateLimiter:
@@ -101,7 +105,7 @@ class ChatClient:
                 # retry allowance that real failures need.
                 last_error = f"HTTP 429: {response.text[:200]}"
                 self._limiter.penalize()
-                time.sleep(self._retry_delay(response, throttles))
+                self._sleep_visibly(self._retry_delay(response, throttles))
                 throttles += 1
                 continue
 
@@ -116,6 +120,17 @@ class ChatClient:
         raise ProviderError(
             f"gave up after {errors} errors and {throttles} rate limits: {last_error}"
         )
+
+    def _sleep_visibly(self, seconds: float) -> None:
+        """Sleep, but let the caller show that this worker is waiting, not stuck."""
+        if self.on_wait is None:
+            time.sleep(seconds)
+            return
+        self.on_wait(True)
+        try:
+            time.sleep(seconds)
+        finally:
+            self.on_wait(False)
 
     def _retry_delay(self, response: requests.Response, attempt: int) -> float:
         """Prefer the wait the server asked for, in whichever form it sent it."""

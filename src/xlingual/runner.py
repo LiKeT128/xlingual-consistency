@@ -8,9 +8,7 @@ the exception - is resumed by running the same command again.
 from __future__ import annotations
 
 import json
-import sys
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -21,6 +19,7 @@ from .config import Config, RESULTS_DIR
 from .dataset import Item
 from .graders import ERROR, NEEDS_JUDGE, grade
 from .judge import judge_answer
+from .progress import Progress
 from .ratelimit import estimate_seconds, format_duration
 
 ANSWERS_FILE = "answers.jsonl"
@@ -125,34 +124,36 @@ def collect_answers(config: Config, items: list[Item], *, languages=LANGUAGES) -
     print(f"  {workers} workers, {config.requests_per_minute} req/min budget "
           f"-> about {format_duration(estimate)}")
 
-    started = time.monotonic()
     failures: list[str] = []
     write_lock = threading.Lock()
-    done_count = 0
 
-    def work(job: tuple[Item, str]) -> tuple[Answer, str | None]:
-        item, language = job
-        prompt = item.prompts[language]
-        try:
-            text = client.complete(prompt)
-            return Answer(item.id, language, config.model, prompt, text), None
-        except ProviderError as exc:
-            return (
-                Answer(item.id, language, config.model, prompt, "", str(exc)),
-                f"{item.id}/{language}: {exc}",
-            )
+    with Progress(len(pending), limiter=client.limiter) as progress:
+        client.on_wait = progress.task_waiting
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(work, job): job for job in pending}
-        for future in as_completed(futures):
-            record, failure = future.result()
-            with write_lock:
-                _append(path, record)
-                done_count += 1
-                if failure:
-                    failures.append(failure)
-                _progress(done_count, len(pending), record.item_id, record.language, started)
-    print()
+        def work(job: tuple[Item, str]) -> tuple[Answer, str | None]:
+            item, language = job
+            prompt = item.prompts[language]
+            progress.task_started()
+            try:
+                text = client.complete(prompt)
+                return Answer(item.id, language, config.model, prompt, text), None
+            except ProviderError as exc:
+                return (
+                    Answer(item.id, language, config.model, prompt, "", str(exc)),
+                    f"{item.id}/{language}: {exc}",
+                )
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(work, job) for job in pending]
+            for future in as_completed(futures):
+                record, failure = future.result()
+                with write_lock:
+                    _append(path, record)
+                    if failure:
+                        failures.append(failure)
+                progress.task_finished(ok=failure is None)
+        client.on_wait = None
+
     report_discovered_rate(config, client)
     report_failures(len(pending), failures)
     return path
@@ -237,24 +238,29 @@ def grade_answers(config: Config, items: list[Item], *, use_judge: bool = True) 
     print(f"Judging {len(needs_judge)} answers with {config.judge_model} "
           f"-> about {format_duration(estimate)}")
 
-    started = time.monotonic()
     write_lock = threading.Lock()
-    done_count = 0
 
-    def work(row: dict):
-        item = by_id[row["item_id"]]
-        return row, judge_answer(client, item, row["language"], row["answer"])
+    with Progress(len(needs_judge), limiter=client.limiter) as progress:
+        client.on_wait = progress.task_waiting
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(work, row) for row in needs_judge]
-        for future in as_completed(futures):
-            row, verdict = future.result()
+        def work(row: dict):
+            progress.task_started()
             item = by_id[row["item_id"]]
-            with write_lock:
-                _append(grades_path, _grade_record(item, row, verdict.status, verdict.detail, True))
-                done_count += 1
-                _progress(done_count, len(needs_judge), item.id, row["language"], started)
-    print()
+            return row, judge_answer(client, item, row["language"], row["answer"])
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(work, row) for row in needs_judge]
+            for future in as_completed(futures):
+                row, verdict = future.result()
+                item = by_id[row["item_id"]]
+                with write_lock:
+                    _append(
+                        grades_path,
+                        _grade_record(item, row, verdict.status, verdict.detail, True),
+                    )
+                progress.task_finished(ok=verdict.status != ERROR)
+        client.on_wait = None
+
     return grades_path
 
 
@@ -268,17 +274,6 @@ def _grade_record(item: Item, row: dict, status: str, detail: str, judged: bool)
         detail=detail,
         judged=judged,
     )
-
-
-def _progress(index: int, total: int, item_id: str, language: str, started: float) -> None:
-    elapsed = time.monotonic() - started
-    rate = index / elapsed if elapsed else 0
-    remaining = (total - index) / rate if rate else 0
-    sys.stdout.write(
-        f"\r  [{index}/{total}] {item_id:<12} {language}  "
-        f"~{remaining / 60:.1f} min left    "
-    )
-    sys.stdout.flush()
 
 
 def load_grades(config: Config) -> list[dict]:
