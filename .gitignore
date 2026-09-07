@@ -1,0 +1,15 @@
+.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.DS_Store
+.idea/
+.vscode/
+
+# Run output depends on the model and the key used, so it is not committed.
+results/
