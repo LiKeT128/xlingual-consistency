@@ -20,6 +20,9 @@ PROVIDERS = {
     "github": "https://models.github.ai/inference",
     "openai": "https://api.openai.com/v1",
     "custom": "",
+    # Offline: answers are generated locally, no key and no network. Lets anyone
+    # run the whole pipeline end to end before spending a single request.
+    "mock": "",
 }
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -98,17 +101,24 @@ class Config:
                 f"Unknown XLC_PROVIDER '{provider}'. "
                 f"Choose one of: {', '.join(sorted(PROVIDERS))}"
             )
-        base_url = env_str("XLC_BASE_URL") or PROVIDERS[provider]
-        if not base_url:
-            raise SystemExit("XLC_PROVIDER=custom requires XLC_BASE_URL to be set.")
-        api_key = env_str("XLC_API_KEY")
-        if not api_key:
-            raise SystemExit(
-                "XLC_API_KEY is not set. Copy .env.example to .env and fill it in."
-            )
-        model = env_str("XLC_MODEL")
-        if not model:
-            raise SystemExit("XLC_MODEL is not set (for example: llama-3.3-70b-versatile).")
+        if provider == "mock":
+            # No key, no endpoint, no quota - the point is to need nothing.
+            base_url, api_key = "mock://local", "mock"
+            model = env_str("XLC_MODEL", "mock")
+        else:
+            base_url = env_str("XLC_BASE_URL") or PROVIDERS[provider]
+            if not base_url:
+                raise SystemExit("XLC_PROVIDER=custom requires XLC_BASE_URL to be set.")
+            api_key = env_str("XLC_API_KEY")
+            if not api_key:
+                raise SystemExit(
+                    "XLC_API_KEY is not set. Copy .env.example to .env and fill it in."
+                )
+            model = env_str("XLC_MODEL")
+            if not model:
+                raise SystemExit(
+                    "XLC_MODEL is not set (for example: llama-3.3-70b-versatile)."
+                )
         return cls(
             provider=provider,
             base_url=base_url.rstrip("/"),

@@ -8,7 +8,9 @@ the exception - is resumed by running the same command again.
 from __future__ import annotations
 
 import json
+import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -19,7 +21,7 @@ from .config import Config, RESULTS_DIR
 from .dataset import Item
 from .graders import ERROR, NEEDS_JUDGE, grade
 from .judge import judge_answer
-from .progress import Progress
+from .progress import Progress, format_elapsed
 from .ratelimit import estimate_seconds, format_duration
 
 ANSWERS_FILE = "answers.jsonl"
@@ -90,18 +92,39 @@ def dedupe_answers(rows: list[dict]) -> list[dict]:
 def preflight(config: Config, client: ChatClient) -> None:
     """Spend one request proving the model id works before spending two hundred.
 
-    A wrong model name is the most common setup mistake and the endpoint answers
-    it instantly, so there is no reason to discover it 200 failed calls later.
+    This is a network call, and on a throttled key it can retry for a while, so
+    it announces itself first and ticks while it waits. A silent check is
+    indistinguishable from a hung program - which is precisely how it read
+    before this printed anything.
     """
+    print(f"Checking model '{config.model}' on {config.provider}...", end="", flush=True)
+    started = time.monotonic()
+    stop = threading.Event()
+
+    def tick() -> None:
+        while not stop.wait(1.0):
+            sys.stdout.write(f"\r  Checking model '{config.model}' on {config.provider}... "
+                             f"{format_elapsed(time.monotonic() - started)}   ")
+            sys.stdout.flush()
+
+    ticker = threading.Thread(target=tick, daemon=True)
+    ticker.start()
     try:
         client.complete("Reply with the single word: ok")
     except ProviderError as exc:
+        stop.set()
+        ticker.join(timeout=2)
         raise SystemExit(
-            f"\nPreflight failed for model '{config.model}' on provider "
+            f"\n\nPreflight failed for model '{config.model}' on provider "
             f"'{config.provider}':\n\n  {exc}\n\n"
             "Run 'xlc models' to see the ids this key can actually call, then fix "
             "XLC_MODEL in .env."
         ) from exc
+    finally:
+        stop.set()
+        ticker.join(timeout=2)
+    print(f"\r  Model '{config.model}' responded in "
+          f"{format_elapsed(time.monotonic() - started)}." + " " * 20, flush=True)
 
 
 def collect_answers(config: Config, items: list[Item], *, languages=LANGUAGES) -> Path:
@@ -112,17 +135,22 @@ def collect_answers(config: Config, items: list[Item], *, languages=LANGUAGES) -
 
     client = ChatClient(config)
     pending = [(item, lang) for item in items for lang in languages if (item.id, lang) not in done]
+
+    # Everything the user needs to see is printed before the first network call,
+    # so the command never sits silent while something slow happens.
+    workers = min(config.concurrency, max(len(pending), 1))
+    estimate = estimate_seconds(len(pending), config.requests_per_minute, workers=workers)
+    print(f"Collecting {len(pending)} answers with {config.model} ({config.provider})", flush=True)
+    if done:
+        print(f"  {len(done)} already collected, skipping those", flush=True)
+    print(f"  {workers} workers, {config.requests_per_minute} req/min budget "
+          f"-> about {format_duration(estimate)}", flush=True)
+
     if not pending:
-        print(f"All {len(items) * len(languages)} answers already collected.")
+        print("Nothing to do: every answer is already collected.", flush=True)
         return path
 
     preflight(config, client)
-
-    workers = min(config.concurrency, len(pending))
-    estimate = estimate_seconds(len(pending), config.requests_per_minute, workers=workers)
-    print(f"Collecting {len(pending)} answers with {config.model} ({config.provider})")
-    print(f"  {workers} workers, {config.requests_per_minute} req/min budget "
-          f"-> about {format_duration(estimate)}")
 
     failures: list[str] = []
     write_lock = threading.Lock()

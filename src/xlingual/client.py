@@ -16,6 +16,7 @@ from typing import Callable
 import requests
 
 from .config import Config
+from .mock import mock_complete
 from .ratelimit import RateLimiter
 
 # Google returns the wait as "retryDelay": "27s" inside the error body.
@@ -63,6 +64,9 @@ class ChatClient:
 
     def complete(self, prompt: str, *, model: str | None = None) -> str:
         """Send one user message and return the assistant's text."""
+        if self.config.provider == "mock":
+            return mock_complete(prompt)
+
         messages = []
         if self.config.system_prompt:
             messages.append({"role": "system", "content": self.config.system_prompt})
@@ -158,6 +162,9 @@ class ChatClient:
         paid ones, so the endpoint is the only reliable answer to "what can I
         run".
         """
+        if self.config.provider == "mock":
+            return ["mock"]
+
         response = self._session.get(
             f"{self.config.base_url}/models",
             headers={"Authorization": f"Bearer {self.config.api_key}"},

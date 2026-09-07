@@ -79,6 +79,18 @@ xlc annotate --sample 50  # hand-label a sample, blind to the judge
 xlc report                # writes results/<model>/report.md
 ```
 
+### Try the whole thing offline first
+
+Before spending a single request, run the pipeline against the built-in offline provider. No key, no network, no quota — it finishes in about two seconds and produces a complete report:
+
+```bash
+XLC_PROVIDER=mock XLC_MODEL=mock xlc run && XLC_PROVIDER=mock XLC_MODEL=mock xlc grade && XLC_PROVIDER=mock XLC_MODEL=mock xlc report
+```
+
+On PowerShell, set `$env:XLC_PROVIDER="mock"` and `$env:XLC_MODEL="mock"` once, then run the three commands normally.
+
+The mock's answers are canned and deliberately part right, part wrong. They say nothing about any real model — the numbers are meaningless by construction. The point is to see the whole path work and know what a healthy run looks like before a slow one starts.
+
 Results are stored per model, so running the suite against two models and diffing the reports is the intended way to ask whether a newer release actually closed the gap.
 
 ## How long a run takes
@@ -125,11 +137,13 @@ Every rate carries a **Wilson 95% interval**. With 12 factual items per language
 ## Development
 
 ```bash
-pytest -q          # 42 tests, no API key needed
+pytest -q          # 77 tests, no API key needed
 xlc validate       # dataset integrity
 ```
 
 CI runs both on Python 3.10, 3.11 and 3.12. Neither touches the network, so the suite is green without secrets.
+
+The suite includes an end-to-end pass that drives `collect -> grade -> report` through the mock provider and asserts on the terminal output as well as the data. Every defect that reached a user in this project was invisible to unit tests and obvious the moment the commands were actually run — a wrong model id that produced 200 error records while reporting success, a rate budget that throttled itself into failure, a status line that only redrew on completion, a preflight call that ran before any output. That class of bug now fails in CI rather than in someone's terminal.
 
 ## Licence
 
