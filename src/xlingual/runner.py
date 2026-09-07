@@ -70,6 +70,24 @@ def _append(path: Path, record) -> None:
         handle.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
 
 
+def dedupe_answers(rows: list[dict]) -> list[dict]:
+    """One row per (item, language), preferring a real answer over an error.
+
+    Retrying a failed run appends a second row for the same prompt, so without
+    this the same prompt would be graded twice and counted twice - once as the
+    error it was and once as the answer it became.
+    """
+    best: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        key = (row["item_id"], row["language"])
+        current = best.get(key)
+        if current is None or (current.get("error") and not row.get("error")):
+            best[key] = row
+        elif not current.get("error") and not row.get("error"):
+            best[key] = row  # later successful attempt wins
+    return list(best.values())
+
+
 def preflight(config: Config, client: ChatClient) -> None:
     """Spend one request proving the model id works before spending two hundred.
 
@@ -135,8 +153,22 @@ def collect_answers(config: Config, items: list[Item], *, languages=LANGUAGES) -
                     failures.append(failure)
                 _progress(done_count, len(pending), record.item_id, record.language, started)
     print()
+    report_discovered_rate(config, client)
     report_failures(len(pending), failures)
     return path
+
+
+def report_discovered_rate(config: Config, client: ChatClient) -> None:
+    """If the provider throttled us, say what rate actually worked."""
+    limiter = client.limiter
+    if not limiter.throttled:
+        return
+    print(
+        f"NOTE: {config.provider} rate-limited this run; the budget settled at "
+        f"{limiter.capacity} req/min (configured {config.requests_per_minute}).\n"
+        f"      Set XLC_RPM={limiter.capacity} in .env to start there next time "
+        f"and skip the discovery."
+    )
 
 
 def report_failures(attempted: int, failures: list[str]) -> None:
@@ -162,7 +194,7 @@ def report_failures(attempted: int, failures: list[str]) -> None:
 def grade_answers(config: Config, items: list[Item], *, use_judge: bool = True) -> Path:
     """Grade collected answers, calling the judge only where code cannot decide."""
     out_dir = _results_dir(config)
-    answers = _read_jsonl(out_dir / ANSWERS_FILE)
+    answers = dedupe_answers(_read_jsonl(out_dir / ANSWERS_FILE))
     if not answers:
         raise SystemExit("No answers found. Run 'xlc run' first.")
 
@@ -254,7 +286,7 @@ def load_grades(config: Config) -> list[dict]:
 
 
 def load_answers(config: Config) -> list[dict]:
-    return _read_jsonl(_results_dir(config) / ANSWERS_FILE)
+    return dedupe_answers(_read_jsonl(_results_dir(config) / ANSWERS_FILE))
 
 
 def results_dir(config: Config) -> Path:

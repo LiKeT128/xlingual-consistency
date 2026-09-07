@@ -83,7 +83,7 @@ class Config:
             judge_model=os.environ.get("XLC_JUDGE_MODEL", "").strip() or model,
             temperature=float(os.environ.get("XLC_TEMPERATURE", "0")),
             max_tokens=int(os.environ.get("XLC_MAX_TOKENS", "512")),
-            requests_per_minute=int(os.environ.get("XLC_RPM", "25")),
+            requests_per_minute=int(os.environ.get("XLC_RPM", "15")),
             concurrency=max(1, int(os.environ.get("XLC_CONCURRENCY", "6"))),
             max_retries=int(os.environ.get("XLC_MAX_RETRIES", "5")),
             timeout=int(os.environ.get("XLC_TIMEOUT", "90")),

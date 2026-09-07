@@ -53,3 +53,34 @@ def test_estimate_is_bounded_by_the_workers_when_the_quota_is_generous():
 def test_format_duration():
     assert format_duration(45) == "45 sec"
     assert format_duration(800) == "13 min"
+
+
+def test_penalize_halves_the_budget_and_flags_it():
+    limiter = RateLimiter(requests_per_minute=16)
+    assert limiter.throttled is False
+    assert limiter.penalize() == 8
+    assert limiter.penalize() == 4
+    assert limiter.throttled is True
+
+
+def test_penalize_never_goes_below_the_floor():
+    limiter = RateLimiter(requests_per_minute=4, min_capacity=2)
+    for _ in range(10):
+        limiter.penalize()
+    assert limiter.capacity == 2
+
+
+def test_a_clean_streak_walks_the_budget_back_up():
+    limiter = RateLimiter(requests_per_minute=16)
+    limiter.penalize()
+    assert limiter.capacity == 8
+    for _ in range(RateLimiter.RECOVERY_STREAK):
+        limiter.reward()
+    assert limiter.capacity == 9
+
+
+def test_reward_does_nothing_at_full_budget():
+    limiter = RateLimiter(requests_per_minute=5)
+    for _ in range(200):
+        limiter.reward()
+    assert limiter.capacity == 5

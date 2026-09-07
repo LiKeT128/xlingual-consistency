@@ -8,6 +8,7 @@ honouring Retry-After when the server sends one.
 from __future__ import annotations
 
 import random
+import re
 import threading
 import time
 
@@ -15,6 +16,9 @@ import requests
 
 from .config import Config
 from .ratelimit import RateLimiter
+
+# Google returns the wait as "retryDelay": "27s" inside the error body.
+_RETRY_DELAY = re.compile(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"')
 
 
 class ProviderError(RuntimeError):
@@ -29,10 +33,18 @@ class ChatClient:
     rather than per worker.
     """
 
+    # Waiting out a rate limit is the correct response to it, so 429 gets its
+    # own generous allowance rather than sharing the one for real failures.
+    RATE_LIMIT_RETRIES = 12
+
     def __init__(self, config: Config) -> None:
         self.config = config
         self._limiter = RateLimiter(config.requests_per_minute)
         self._local = threading.local()
+
+    @property
+    def limiter(self) -> RateLimiter:
+        return self._limiter
 
     @property
     def _session(self) -> requests.Session:
@@ -65,7 +77,9 @@ class ChatClient:
         url = f"{self.config.base_url}/chat/completions"
 
         last_error = ""
-        for attempt in range(self.config.max_retries):
+        errors = 0        # 5xx and network faults - may genuinely not recover
+        throttles = 0     # 429 - not a failure, just "later"
+        while errors < self.config.max_retries and throttles < self.RATE_LIMIT_RETRIES:
             self._throttle()
             try:
                 response = self._session.post(
@@ -73,27 +87,54 @@ class ChatClient:
                 )
             except requests.RequestException as exc:
                 last_error = f"network error: {exc}"
-                self._backoff(attempt)
+                time.sleep(min(2**errors + random.random(), 60.0))
+                errors += 1
                 continue
 
             if response.status_code == 200:
+                self._limiter.reward()
                 return self._extract(response.json())
 
-            if response.status_code in (429, 500, 502, 503, 504):
+            if response.status_code == 429:
+                # A 429 means our budget is wrong, not that the request is bad.
+                # Shrink the budget and keep waiting, instead of spending the
+                # retry allowance that real failures need.
+                last_error = f"HTTP 429: {response.text[:200]}"
+                self._limiter.penalize()
+                time.sleep(self._retry_delay(response, throttles))
+                throttles += 1
+                continue
+
+            if response.status_code in (500, 502, 503, 504):
                 last_error = f"HTTP {response.status_code}: {response.text[:200]}"
-                retry_after = response.headers.get("Retry-After")
-                if retry_after:
-                    try:
-                        time.sleep(min(float(retry_after), 120))
-                        continue
-                    except ValueError:
-                        pass
-                self._backoff(attempt)
+                time.sleep(self._retry_delay(response, errors))
+                errors += 1
                 continue
 
             raise ProviderError(f"HTTP {response.status_code}: {response.text[:400]}")
 
-        raise ProviderError(f"gave up after {self.config.max_retries} attempts: {last_error}")
+        raise ProviderError(
+            f"gave up after {errors} errors and {throttles} rate limits: {last_error}"
+        )
+
+    def _retry_delay(self, response: requests.Response, attempt: int) -> float:
+        """Prefer the wait the server asked for, in whichever form it sent it."""
+        header = response.headers.get("Retry-After")
+        if header:
+            try:
+                return min(float(header), 120.0)
+            except ValueError:
+                pass
+
+        # Google puts the wait inside the error body rather than in a header.
+        match = _RETRY_DELAY.search(response.text or "")
+        if match:
+            try:
+                return min(float(match.group(1)), 120.0)
+            except ValueError:
+                pass
+
+        return min(2**attempt + random.random(), 60.0)
 
     def list_models(self) -> list[str]:
         """Ask the provider which model ids this key can actually call.
