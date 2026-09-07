@@ -40,6 +40,40 @@ def load_dotenv(path: Path | None = None) -> None:
         os.environ.setdefault(key.strip(), value.strip().strip("'\""))
 
 
+def env_str(name: str, default: str = "") -> str:
+    """Treat an empty value as absent.
+
+    'XLC_RPM=' in a .env file sets the variable to an empty string, so
+    os.environ.get(name, default) returns '' rather than the default. Every
+    numeric setting has to survive that, because deleting a value is exactly
+    what someone does when they mean 'use the default'.
+    """
+    value = os.environ.get(name)
+    return value.strip() if value and value.strip() else default
+
+
+def env_int(name: str, default: int) -> int:
+    raw = env_str(name, str(default))
+    try:
+        return int(raw)
+    except ValueError:
+        raise SystemExit(
+            f"{name} must be a whole number, but .env has {name}={raw!r}. "
+            f"Remove the line to use the default ({default})."
+        ) from None
+
+
+def env_float(name: str, default: float) -> float:
+    raw = env_str(name, str(default))
+    try:
+        return float(raw)
+    except ValueError:
+        raise SystemExit(
+            f"{name} must be a number, but .env has {name}={raw!r}. "
+            f"Remove the line to use the default ({default})."
+        ) from None
+
+
 @dataclass(frozen=True)
 class Config:
     provider: str
@@ -58,21 +92,21 @@ class Config:
     @classmethod
     def from_env(cls) -> "Config":
         load_dotenv()
-        provider = os.environ.get("XLC_PROVIDER", "groq").strip().lower()
+        provider = env_str("XLC_PROVIDER", "groq").lower()
         if provider not in PROVIDERS:
             raise SystemExit(
                 f"Unknown XLC_PROVIDER '{provider}'. "
                 f"Choose one of: {', '.join(sorted(PROVIDERS))}"
             )
-        base_url = os.environ.get("XLC_BASE_URL") or PROVIDERS[provider]
+        base_url = env_str("XLC_BASE_URL") or PROVIDERS[provider]
         if not base_url:
             raise SystemExit("XLC_PROVIDER=custom requires XLC_BASE_URL to be set.")
-        api_key = os.environ.get("XLC_API_KEY", "").strip()
+        api_key = env_str("XLC_API_KEY")
         if not api_key:
             raise SystemExit(
                 "XLC_API_KEY is not set. Copy .env.example to .env and fill it in."
             )
-        model = os.environ.get("XLC_MODEL", "").strip()
+        model = env_str("XLC_MODEL")
         if not model:
             raise SystemExit("XLC_MODEL is not set (for example: llama-3.3-70b-versatile).")
         return cls(
@@ -80,12 +114,12 @@ class Config:
             base_url=base_url.rstrip("/"),
             api_key=api_key,
             model=model,
-            judge_model=os.environ.get("XLC_JUDGE_MODEL", "").strip() or model,
-            temperature=float(os.environ.get("XLC_TEMPERATURE", "0")),
-            max_tokens=int(os.environ.get("XLC_MAX_TOKENS", "512")),
-            requests_per_minute=int(os.environ.get("XLC_RPM", "15")),
-            concurrency=max(1, int(os.environ.get("XLC_CONCURRENCY", "6"))),
-            max_retries=int(os.environ.get("XLC_MAX_RETRIES", "5")),
-            timeout=int(os.environ.get("XLC_TIMEOUT", "90")),
+            judge_model=env_str("XLC_JUDGE_MODEL") or model,
+            temperature=env_float("XLC_TEMPERATURE", 0.0),
+            max_tokens=env_int("XLC_MAX_TOKENS", 512),
+            requests_per_minute=max(1, env_int("XLC_RPM", 15)),
+            concurrency=max(1, env_int("XLC_CONCURRENCY", 6)),
+            max_retries=max(1, env_int("XLC_MAX_RETRIES", 5)),
+            timeout=max(1, env_int("XLC_TIMEOUT", 90)),
             system_prompt=os.environ.get("XLC_SYSTEM_PROMPT", ""),
         )
